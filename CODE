@@ -1,0 +1,204 @@
+# This script requires the following libraries:
+# pip install backtrader
+# pip install yfinance
+# pip install pandas
+
+import backtrader as bt
+import yfinance as yf
+from datetime import datetime
+
+# Define the custom trading strategy
+class DemandSupplyZoneStrategy(bt.Strategy):
+    """
+    An algorithmic trading strategy that identifies and trades at key demand and supply zones.
+
+    The strategy uses a combination of price action analysis and multiple technical
+    indicators (RSI, MACD, Volume, EMA) to generate buy and sell signals.
+    """
+    
+    # Define parameters for the strategy
+    params = (
+        ('rsi_period', 14),
+        ('ema_period', 20),
+        ('macd_fast', 12),
+        ('macd_slow', 26),
+        ('macd_signal', 9),
+        ('risk_reward_ratio', 3.0),
+        ('stop_loss_percent', 0.01),  # 1% stop loss
+    )
+
+    def __init__(self):
+        """
+        Initializes the indicators and variables for the strategy.
+        """
+        # Indicators
+        self.rsi = bt.indicators.RSI_SMA(self.data.close, period=self.p.rsi_period)
+        self.ema = bt.indicators.EMA(self.data.close, period=self.p.ema_period)
+        self.macd = bt.indicators.MACD(
+            self.data.close,
+            period_fast=self.p.macd_fast,
+            period_slow=self.p.macd_slow,
+            period_signal=self.p.macd_signal
+        )
+        self.volume = self.data.volume
+
+        # Order and trade tracking
+        self.order = None
+        self.trade = None
+
+        # Custom variables to track demand/supply zones
+        # In a real-world scenario, these would be identified programmatically
+        # For this example, we'll use a simple approach to simulate the zones.
+        self.demand_zone = 0
+        self.supply_zone = 0
+        self.in_zone = False
+        
+        # A simple flag to avoid multiple trades in a row
+        self.trade_executed = False
+
+    def log(self, txt, dt=None):
+        """
+        Logging function for the strategy.
+        """
+        dt = dt or self.datas[0].datetime.date(0)
+        print(f'{dt.isoformat()}, {txt}')
+
+    def notify_order(self, order):
+        """
+        Handles order notifications (e.g., submitted, completed, canceled).
+        """
+        if order.status in [order.Submitted, order.Accepted]:
+            # Order has been submitted/accepted - nothing to do
+            return
+        
+        if order.status in [order.Completed]:
+            if order.isbuy():
+                self.log(f'BUY EXECUTED, Price: {order.executed.price:.2f}, Cost: {order.executed.value:.2f}, Comm: {order.executed.comm:.2f}')
+            elif order.issell():
+                self.log(f'SELL EXECUTED, Price: {order.executed.price:.2f}, Cost: {order.executed.value:.2f}, Comm: {order.executed.comm:.2f}')
+            
+            self.order = None
+            self.trade_executed = True
+
+        elif order.status in [order.Canceled, order.Margin, order.Rejected]:
+            self.log('Order Canceled/Margin/Rejected')
+        
+        self.order = None
+
+    def notify_trade(self, trade):
+        """
+        Handles trade notifications (e.g., opened, closed).
+        """
+        if not trade.isclosed:
+            return
+
+        self.log(f'TRADE CLOSED, Gross P/L: {trade.pnl:.2f}, Net P/L: {trade.pnlcomm:.2f}')
+        self.trade = None
+        self.trade_executed = False # Allow a new trade to be placed
+
+    def next(self):
+        """
+        The main logic for the trading strategy, executed on each new bar.
+        """
+        # Check if an order is pending
+        if self.order:
+            return
+
+        # Simple logic to simulate zone identification
+        # In a real bot, this would be based on advanced price action analysis
+        if self.data.low[0] < self.data.low[-1] and self.data.low[-1] < self.data.low[-2]:
+            self.demand_zone = self.data.low[0]
+            self.in_zone = True
+        elif self.data.high[0] > self.data.high[-1] and self.data.high[-1] > self.data.high[-2]:
+            self.supply_zone = self.data.high[0]
+            self.in_zone = True
+        else:
+            self.in_zone = False
+
+        # If we are not in the market and in a valid zone, check for entry signals
+        if not self.position and self.in_zone and not self.trade_executed:
+            # Entry condition:
+            # Price is in a demand zone
+            # RSI is oversold (< 30)
+            # MACD is about to cross bullish (macd_line > macd_signal_line)
+            # Volume is increasing
+            if self.data.close[0] < self.demand_zone and \
+               self.rsi[0] < 30 and \
+               self.macd.macd[0] > self.macd.signal[0] and \
+               self.volume[0] > self.volume[-1]:
+                
+                self.log(f'BUY SIGNAL, Price: {self.data.close[0]:.2f}')
+                self.order = self.buy()
+                
+                # Calculate Stop Loss and Take Profit levels
+                stop_loss = self.data.close[0] * (1 - self.p.stop_loss_percent)
+                take_profit = self.data.close[0] + (self.data.close[0] - stop_loss) * self.p.risk_reward_ratio
+
+                # Add stop loss and take profit orders
+                self.sl_order = self.sell(exectype=bt.Order.Stop, price=stop_loss)
+                self.tp_order = self.sell(exectype=bt.Order.Limit, price=take_profit)
+                
+            # Exit condition:
+            # Price is in a supply zone
+            # RSI is overbought (> 70)
+            # MACD is about to cross bearish (macd_line < macd_signal_line)
+            # Volume is decreasing
+            if self.data.close[0] > self.supply_zone and \
+               self.rsi[0] > 70 and \
+               self.macd.macd[0] < self.macd.signal[0] and \
+               self.volume[0] < self.volume[-1]:
+                
+                self.log(f'SELL SIGNAL, Price: {self.data.close[0]:.2f}')
+                self.order = self.sell()
+                
+                # Calculate Stop Loss and Take Profit levels
+                stop_loss = self.data.close[0] * (1 + self.p.stop_loss_percent)
+                take_profit = self.data.close[0] - (stop_loss - self.data.close[0]) * self.p.risk_reward_ratio
+                
+                # Add stop loss and take profit orders
+                self.sl_order = self.buy(exectype=bt.Order.Stop, price=stop_loss)
+                self.tp_order = self.buy(exectype=bt.Order.Limit, price=take_profit)
+
+    def stop(self):
+        """
+        Executed when the backtest is complete.
+        """
+        # Not used for this simple example, but useful for more complex scenarios
+        pass
+
+# Main script for backtesting
+if __name__ == '__main__':
+    cerebro = bt.Cerebro()
+
+    # Add the strategy
+    cerebro.addstrategy(DemandSupplyZoneStrategy)
+
+    # Download historical data from Yahoo Finance
+    # For a real project, you would use a more reliable data source
+    ticker = 'EURUSD=X'  # Example forex pair from Yahoo Finance
+    data = yf.download(ticker, start='2019-01-01', end=datetime.now().strftime('%Y-%m-%d'))
+    datafeed = bt.feeds.PandasData(dataname=data)
+
+    cerebro.adddata(datafeed)
+
+    # Set initial cash and commission
+    start_cash = 100000.0
+    cerebro.broker.setcash(start_cash)
+    cerebro.broker.setcommission(commission=0.0001)
+
+    print(f'Starting Portfolio Value: {cerebro.broker.getvalue():.2f}')
+
+    # Run the backtest
+    cerebro.run()
+
+    final_value = cerebro.broker.getvalue()
+    print(f'Final Portfolio Value: {final_value:.2f}')
+    
+    # Calculate the profit/loss percentage
+    pnl = final_value - start_cash
+    pnl_percent = (pnl / start_cash) * 100
+    print(f'Total P/L: {pnl:.2f}')
+    print(f'P/L Percentage: {pnl_percent:.2f}%')
+    
+    # Optional: Plot the results (requires matplotlib)
+    # cerebro.plot()
